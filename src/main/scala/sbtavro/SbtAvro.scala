@@ -2,22 +2,21 @@ package sbtavro
 
 import java.io.File
 
-import scala.collection.mutable
-import scala.io.Source
-
-import org.apache.avro.{Protocol, Schema}
 import org.apache.avro.compiler.idl.Idl
 import org.apache.avro.compiler.specific.SpecificCompiler
 import org.apache.avro.compiler.specific.SpecificCompiler.FieldVisibility
 import org.apache.avro.generic.GenericData.StringType
-
-import sbt._
+import org.apache.avro.{Protocol, Schema}
 import sbt.ConfigKey.configurationToKey
-import sbt.Keys.{classpathTypes, cleanFiles, ivyConfigurations, javaSource, libraryDependencies, managedClasspath, managedSourceDirectories, sourceDirectory, sourceGenerators, sourceManaged, streams, update, version}
+import sbt.Keys._
+import sbt._
+
+import scala.collection.mutable
+import scala.io.Source
 
 /**
- * Simple plugin for generating the Java sources for Avro schemas and protocols.
- */
+  * Simple plugin for generating the Java sources for Avro schemas and protocols.
+  */
 object SbtAvro extends AutoPlugin {
 
   object autoImport {
@@ -26,6 +25,8 @@ object SbtAvro extends AutoPlugin {
 
     val stringType = SettingKey[String]("string-type", "Type for representing strings. " +
       "Possible values: CharSequence, String, Utf8. Default: CharSequence.")
+
+    val enableDecimalLogicalType = SettingKey[Boolean]("enableDecimalLogicalType", "Set to true to use java.math.BigDecimal instead of java.nio.ByteBuffer for logical type \"decimal\"")
 
     val fieldVisibility = SettingKey[String]("field-visibiliy", "Field Visibility for the properties" +
       "Possible values: private, public, public_deprecated. Default: public_deprecated.")
@@ -37,6 +38,7 @@ object SbtAvro extends AutoPlugin {
       javaSource := (sourceManaged in Compile).value / "compiled_avro",
       stringType := "CharSequence",
       fieldVisibility := "public_deprecated",
+      enableDecimalLogicalType := true,
       version := "1.8.2",
 
       managedClasspath := {
@@ -53,6 +55,7 @@ object SbtAvro extends AutoPlugin {
   }
 
   import autoImport._
+
   override def requires = sbt.plugins.JvmPlugin
 
   // This plugin is automatically enabled for projects which are JvmPlugin.
@@ -61,51 +64,54 @@ object SbtAvro extends AutoPlugin {
   // a group of settings that are automatically added to projects.
   override val projectSettings = avroSettings
 
-  def compileIdl(idl: File, target: File, stringType: StringType, fieldVisibility: FieldVisibility) {
+  def compileIdl(idl: File, target: File, stringType: StringType, fieldVisibility: FieldVisibility, enableDecimalLogicalType: Boolean) {
     val parser = new Idl(idl)
     val protocol = Protocol.parse(parser.CompilationUnit.toString)
     val compiler = new SpecificCompiler(protocol)
     compiler.setStringType(stringType)
     compiler.setFieldVisibility(fieldVisibility)
+    compiler.setEnableDecimalLogicalType(enableDecimalLogicalType)
     compiler.compileToDestination(null, target)
   }
 
   private lazy val schemaParser = new Schema.Parser()
 
-  def compileAvsc(avsc: File, target: File, stringType: StringType, fieldVisibility: FieldVisibility) {
+  def compileAvsc(avsc: File, target: File, stringType: StringType, fieldVisibility: FieldVisibility, enableDecimalLogicalType: Boolean) {
     val schema = schemaParser.parse(avsc)
     val compiler = new SpecificCompiler(schema)
     compiler.setStringType(stringType)
     compiler.setFieldVisibility(fieldVisibility)
+    compiler.setEnableDecimalLogicalType(enableDecimalLogicalType)
     compiler.compileToDestination(null, target)
   }
 
-  def compileAvpr(avpr: File, target: File, stringType: StringType, fieldVisibility: FieldVisibility) {
+  def compileAvpr(avpr: File, target: File, stringType: StringType, fieldVisibility: FieldVisibility, enableDecimalLogicalType: Boolean) {
     val protocol = Protocol.parse(avpr)
     val compiler = new SpecificCompiler(protocol)
     compiler.setStringType(stringType)
     compiler.setFieldVisibility(fieldVisibility)
+    compiler.setEnableDecimalLogicalType(enableDecimalLogicalType)
     compiler.compileToDestination(null, target)
   }
 
-  private[this] def compile(srcDir: File, target: File, log: Logger, stringTypeName: String, fieldVisibilityName: String): Set[File] = {
+  private[this] def compile(srcDir: File, target: File, log: Logger, stringTypeName: String, fieldVisibilityName: String, enableDecimalLogicalType: Boolean): Set[File] = {
     val stringType = StringType.valueOf(stringTypeName)
     val fieldVisibility = SpecificCompiler.FieldVisibility.valueOf(fieldVisibilityName.toUpperCase)
     log.info("Avro compiler using stringType=%s".format(stringType))
 
     for (idl <- (srcDir ** "*.avdl").get) {
       log.info("Compiling Avro IDL %s".format(idl))
-      compileIdl(idl, target, stringType, fieldVisibility)
+      compileIdl(idl, target, stringType, fieldVisibility, enableDecimalLogicalType)
     }
 
     for (avsc <- sortSchemaFiles((srcDir ** "*.avsc").get)) {
       log.info("Compiling Avro schema %s".format(avsc))
-      compileAvsc(avsc, target, stringType, fieldVisibility)
+      compileAvsc(avsc, target, stringType, fieldVisibility, enableDecimalLogicalType)
     }
 
     for (avpr <- (srcDir ** "*.avpr").get) {
       log.info("Compiling Avro protocol %s".format(avpr))
-      compileAvpr(avpr, target, stringType, fieldVisibility)
+      compileAvpr(avpr, target, stringType, fieldVisibility, enableDecimalLogicalType)
     }
 
     (target ** "*.java").get.toSet
@@ -117,18 +123,19 @@ object SbtAvro extends AutoPlugin {
     val javaSrc = (javaSource in AvroConfig).value
     val strType = stringType.value
     val fieldVis = fieldVisibility.value
+    val enbDecimal = enableDecimalLogicalType.value
     val cachedCompile = FileFunction.cached(out.cacheDirectory / "avro",
       inStyle = FilesInfo.lastModified,
       outStyle = FilesInfo.exists) { (in: Set[File]) =>
-        compile(srcDir, javaSrc, out.log, strType, fieldVis)
-      }
+      compile(srcDir, javaSrc, out.log, strType, fieldVis, enbDecimal)
+    }
     cachedCompile((srcDir ** "*.av*").get.toSet).toSeq
   }
 
   def sortSchemaFiles(files: Traversable[File]): Seq[File] = {
     val reversed = mutable.MutableList.empty[File]
     var used: Traversable[File] = files
-    while(!used.isEmpty) {
+    while (!used.isEmpty) {
       val usedUnused = usedUnusedSchemas(used)
       reversed ++= usedUnused._2
       used = usedUnused._1
@@ -146,7 +153,7 @@ object SbtAvro extends AutoPlugin {
       val fullName = extractFullName(f)
       (f, files.count { candidate =>
         strContainsType(fileText(candidate), fullName)
-      } )
+      })
     }.partition(_._2 > 0)
     (usedUnused._1.map(_._1), usedUnused._2.map(_._1))
   }
@@ -155,7 +162,7 @@ object SbtAvro extends AutoPlugin {
     val txt = fileText(f)
     val namespace = namespaceRegex.findFirstMatchIn(txt)
     val name = nameRegex.findFirstMatchIn(txt)
-    if(namespace == None) {
+    if (namespace == None) {
       return name.get.group(1)
     } else {
       return s"${namespace.get.group(1)}.${name.get.group(1)}"
